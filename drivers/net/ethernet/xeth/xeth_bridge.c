@@ -83,7 +83,7 @@ static int xeth_bridge_add_lower(struct net_device *br,
 				 struct netlink_ext_ack *extack)
 {
 	struct xeth_bridge_priv *priv = netdev_priv(br);
-	struct xeth_proxy *lower;
+	struct xeth_proxy *proxy;
 	int err;
 
 	if (!is_xeth_port(nd) && !is_xeth_vlan(nd) && !is_xeth_lag(nd)) {
@@ -96,20 +96,16 @@ static int xeth_bridge_add_lower(struct net_device *br,
 		return -EBUSY;
 	}
 
-	lower = netdev_priv(nd);
-
-	call_netdevice_notifiers(NETDEV_JOIN, nd);
+	proxy = netdev_priv(nd);
 
 	err = netdev_master_upper_dev_link(nd, br, NULL, NULL, extack);
-	if (err <= 0) {
-		NL_SET_ERR_MSG(extack, "link failed");
+	if (err)
 		return err;
-	}
 
 	nd->flags |= IFF_SLAVE;
 
 	xeth_sbtx_change_upper(priv->proxy.mux, priv->proxy.xid,
-			       lower->xid, true);
+			       proxy->xid, true);
 	return 0;
 }
 
@@ -229,7 +225,8 @@ static int xeth_bridge_newlink(struct net *src_net, struct net_device *br,
 		}
 	xeth_mux_add_proxy(&priv->proxy);
 
-	if (err = register_netdevice(br), err < 0) {
+	err = xeth_debug_nd_err(br, register_netdevice(br));
+	if (err) {
 		NL_SET_ERR_MSG(extack, "registry failed");
 		xeth_mux_del_proxy(&priv->proxy);
 		return err;
@@ -237,10 +234,11 @@ static int xeth_bridge_newlink(struct net *src_net, struct net_device *br,
 
 	xeth_sbtx_ifinfo(&priv->proxy, 0, XETH_IFINFO_REASON_NEW);
 
-	if (err = xeth_bridge_add_lower(br, link, extack), err < 0) {
-		unregister_netdevice(br);
+	err = xeth_bridge_add_lower(br, link, extack);
+	if (err) {
 		xeth_mux_del_proxy(&priv->proxy);
 		xeth_sbtx_ifinfo(&priv->proxy, 0, XETH_IFINFO_REASON_DEL);
+		unregister_netdevice(br);
 		return err;
 	}
 

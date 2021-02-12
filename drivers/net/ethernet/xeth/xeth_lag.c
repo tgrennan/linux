@@ -92,7 +92,7 @@ static int xeth_lag_add_lower(struct net_device *lag,
 			      struct netlink_ext_ack *extack)
 {
 	struct xeth_lag_priv *priv = netdev_priv(lag);
-	struct xeth_proxy *lower;
+	struct xeth_proxy *proxy;
 	int err;
 
 	if (!is_xeth_port(nd)) {
@@ -108,20 +108,16 @@ static int xeth_lag_add_lower(struct net_device *lag,
 		return -EBUSY;
 	}
 
-	lower = netdev_priv(nd);
-
-	call_netdevice_notifiers(NETDEV_JOIN, nd);
+	proxy = netdev_priv(nd);
 
 	err = netdev_master_upper_dev_link(nd, lag, NULL, NULL, extack);
-	if (err <= 0) {
-		NL_SET_ERR_MSG(extack, "link failed");
+	if (err)
 		return err;
-	}
 
 	nd->flags |= IFF_TEAM_PORT;
 
 	xeth_sbtx_change_upper(priv->proxy.mux, priv->proxy.xid,
-			       lower->xid, true);
+			       proxy->xid, true);
 	return 0;
 }
 
@@ -249,9 +245,9 @@ static int xeth_lag_newlink(struct net *src_net, struct net_device *lag,
 	xeth_sbtx_ifinfo(&priv->proxy, 0, XETH_IFINFO_REASON_NEW);
 
 	if (err = xeth_lag_add_lower(lag, link, extack), err < 0) {
-		unregister_netdevice(lag);
 		xeth_mux_del_proxy(&priv->proxy);
 		xeth_sbtx_ifinfo(&priv->proxy, 0, XETH_IFINFO_REASON_DEL);
+		unregister_netdevice(lag);
 		return err;
 	}
 
