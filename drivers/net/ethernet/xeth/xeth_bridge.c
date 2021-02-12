@@ -40,7 +40,6 @@ static int xeth_bridge_del_lower(struct net_device *br, struct net_device *nd)
 	struct xeth_bridge_priv *priv = netdev_priv(br);
 	struct xeth_proxy *lower = netdev_priv(nd);
 
-	nd->priv_flags &= ~IFF_BRIDGE_PORT;
 	nd->flags &= ~IFF_SLAVE;
 
 	netdev_upper_dev_unlink(nd, br);
@@ -78,6 +77,29 @@ void xeth_bridge_uninit(struct net_device *br)
 	xeth_proxy_uninit(br);
 }
 
+static int xeth_bridge_ok_lower(struct net_device *nd,
+				struct netlink_ext_ack *extack)
+{
+	if (!is_xeth_port(nd) && !is_xeth_vlan(nd) && !is_xeth_lag(nd)) {
+		NL_SET_ERR_MSG(extack, "xeth-bridge may only bind "
+			       "an xeth-{port, vlan, or lag}");
+		return -EINVAL;
+	}
+	if (nd->flags & IFF_SLAVE) {
+		NL_SET_ERR_MSG(extack, "already a xeth-bridge member");
+		return -EBUSY;
+	}
+	if (nd->priv_flags & IFF_TEAM_PORT) {
+		NL_SET_ERR_MSG(extack, "already a xeth-lag member");
+		return -EBUSY;
+	}
+	if (netdev_master_upper_dev_get(nd)) {
+		NL_SET_ERR_MSG(extack, "link busy");
+		return -EBUSY;
+	}
+	return 0;
+}
+
 static int xeth_bridge_add_lower(struct net_device *br,
 				 struct net_device *nd,
 				 struct netlink_ext_ack *extack)
@@ -86,15 +108,9 @@ static int xeth_bridge_add_lower(struct net_device *br,
 	struct xeth_proxy *proxy;
 	int err;
 
-	if (!is_xeth_port(nd) && !is_xeth_vlan(nd) && !is_xeth_lag(nd)) {
-		NL_SET_ERR_MSG(extack, "xeth-bridge may only bind "
-			       "xeth-{port,vlan,lag}");
-		return -EINVAL;
-	}
-	if (netdev_master_upper_dev_get(nd)) {
-		NL_SET_ERR_MSG(extack, "link busy");
-		return -EBUSY;
-	}
+	err = xeth_bridge_ok_lower(nd, extack);
+	if (err)
+		return err;
 
 	proxy = netdev_priv(nd);
 
@@ -202,11 +218,9 @@ static int xeth_bridge_newlink(struct net *src_net, struct net_device *br,
 		NL_SET_ERR_MSG(extack, "unkown link");
 		return err;
 	}
-	if (!is_xeth_port(link) && !is_xeth_vlan(link) && !is_xeth_lag(link)) {
-		NL_SET_ERR_MSG(extack, "xeth-bridge may only bind "
-			       "an xeth-{port, vlan, or lag}");
-		return -EINVAL;
-	}
+	err = xeth_bridge_ok_lower(link, extack);
+	if (err)
+		return err;
 
 	lower = netdev_priv(link);
 	priv->proxy.nd = br;

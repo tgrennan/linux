@@ -39,7 +39,6 @@ static int xeth_lag_del_lower(struct net_device *lag, struct net_device *nd)
 	struct xeth_proxy *lower = netdev_priv(nd);
 
 	nd->priv_flags &= ~IFF_TEAM_PORT;
-	nd->flags &= ~IFF_SLAVE;
 
 	netdev_upper_dev_unlink(nd, lag);
 	netdev_update_features(lag);
@@ -87,6 +86,28 @@ static int xeth_lag_n_lowers(struct net_device *lag)
 	return i;
 }
 
+static int xeth_lag_ok_lower(struct net_device *nd,
+			     struct netlink_ext_ack *extack)
+{
+	if (!is_xeth_port(nd)) {
+		NL_SET_ERR_MSG(extack, "xeth-lag may only bind an xeth-port");
+		return -EINVAL;
+	}
+	if (nd->flags & IFF_SLAVE) {
+		NL_SET_ERR_MSG(extack, "already a xeth-bridge member");
+		return -EBUSY;
+	}
+	if (nd->priv_flags & IFF_TEAM_PORT) {
+		NL_SET_ERR_MSG(extack, "already a xeth-lag member");
+		return -EBUSY;
+	}
+	if (netdev_master_upper_dev_get(nd)) {
+		NL_SET_ERR_MSG(extack, "link busy");
+		return -EBUSY;
+	}
+	return 0;
+}
+
 static int xeth_lag_add_lower(struct net_device *lag,
 			      struct net_device *nd,
 			      struct netlink_ext_ack *extack)
@@ -95,17 +116,12 @@ static int xeth_lag_add_lower(struct net_device *lag,
 	struct xeth_proxy *proxy;
 	int err;
 
-	if (!is_xeth_port(nd)) {
-		NL_SET_ERR_MSG(extack, "xeth-lag may only bind an xeth-port");
-		return -EINVAL;
-	}
+	err = xeth_lag_ok_lower(nd, extack);
+	if (err)
+		return err;
 	if (xeth_lag_n_lowers(lag) >= 8) {
 		NL_SET_ERR_MSG(extack, "xeth-lag full");
 		return -ERANGE;
-	}
-	if (netdev_master_upper_dev_get(nd)) {
-		NL_SET_ERR_MSG(extack, "link busy");
-		return -EBUSY;
 	}
 
 	proxy = netdev_priv(nd);
@@ -214,10 +230,9 @@ static int xeth_lag_newlink(struct net *src_net, struct net_device *lag,
 		NL_SET_ERR_MSG(extack, "unkown link");
 		return err;
 	}
-	if (!is_xeth_port(link)) {
-		NL_SET_ERR_MSG(extack, "xeth-lag may only bind an xeth-port");
-		return -EINVAL;
-	}
+	err = xeth_lag_ok_lower(link, extack);
+	if (err)
+		return err;
 
 	lower = netdev_priv(link);
 	priv->proxy.nd = lag;
