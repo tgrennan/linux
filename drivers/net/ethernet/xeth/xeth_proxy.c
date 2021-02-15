@@ -80,8 +80,6 @@ void xeth_proxy_link_stat(struct net_device *nd, u32 index, u64 count)
 
 int xeth_proxy_init(struct net_device *nd)
 {
-	struct xeth_proxy *proxy = netdev_priv(nd);
-	spin_lock_init(&proxy->defer.mutex);
 	nd->hw_features = NETIF_F_HW_L2FW_DOFFLOAD;
 	nd->features |= NETIF_F_VLAN_CHALLENGED;
 	nd->features &= ~NETIF_F_SOFT_FEATURES;

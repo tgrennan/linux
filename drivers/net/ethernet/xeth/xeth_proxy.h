@@ -22,22 +22,19 @@ struct xeth_proxy {
 	/* @node: XID hash entry */
 	struct hlist_node __rcu	node;
 	/* @kin: other proxies of the same kind */
-	struct list_head kin;
-	/* @defer: pending task */
-	struct {
-		struct spinlock mutex;
-		struct list_head list;
-	} defer;
+	struct list_head __rcu	kin;
+	/* @quit: pending quit from lag or bridge */
+	struct list_head quit;
 	atomic64_t link_stats[XETH_N_LINK_STAT];
 	enum xeth_dev_kind kind;
 	u32 xid;
 };
 
-#define xeth_proxy_of_rcu(ptr)						\
-	container_of(ptr, struct xeth_proxy, rcu)
-
 #define xeth_proxy_of_kin(ptr)						\
 	container_of(ptr, struct xeth_proxy, kin)
+
+#define xeth_proxy_of_quit(ptr)						\
+	container_of(ptr, struct xeth_proxy, quit)
 
 struct xeth_proxy *xeth_mux_proxy_of_xid(struct net_device *mux, u32 xid);
 struct xeth_proxy *xeth_mux_proxy_of_nd(struct net_device *mux,

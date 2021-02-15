@@ -58,20 +58,18 @@ void xeth_bridge_uninit(struct net_device *br)
 	struct xeth_proxy *lower, *tmp;
 	struct net_device *nd;
 	struct list_head *lowers;
-	LIST_HEAD(defer);
+	LIST_HEAD(quit);
 
 	rcu_read_lock();
 	netdev_for_each_lower_dev(br, nd, lowers) {
 		lower = netdev_priv(nd);
-		spin_lock(&lower->defer.mutex);
-		list_add_tail(&lower->defer.list, &defer);
+		list_add_tail(&lower->quit, &quit);
 	}
 	rcu_read_unlock();
 
-	list_for_each_entry_safe(lower, tmp, &defer, defer.list) {
+	list_for_each_entry_safe(lower, tmp, &quit, quit) {
 		xeth_bridge_del_lower(br, lower->nd);
-		list_del(&lower->defer.list);
-		spin_unlock(&lower->defer.mutex);
+		list_del(&lower->quit);
 	}
 
 	xeth_proxy_uninit(br);

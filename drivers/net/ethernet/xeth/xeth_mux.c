@@ -38,31 +38,63 @@ struct xeth_mux_priv {
 	struct xeth_nb nb;
 	struct task_struct *main;
 	struct platform_device *xeth;
+	struct net_device *link[xeth_mux_link_hash_bkts];
 	struct {
-		struct spinlock mutex;
-		struct net_device *ht[xeth_mux_link_hash_bkts];
-	} link;
-	struct {
-		struct spinlock mutex;
-		struct hlist_head __rcu hls[xeth_mux_proxy_hash_bkts];
+		struct mutex mutex;
+		struct xeth_proxy __rcu	*last;
+		struct hlist_head __rcu	hls[xeth_mux_proxy_hash_bkts];
+		struct list_head __rcu ports, vlans, bridges, lags, lbs;
 	} proxy;
-	struct {
-		struct spinlock mutex;
-		struct list_head list;
-	} bridges, lags, vlans, ports;
 	atomic64_t counters[xeth_mux_n_counters];
 	atomic64_t link_stats[XETH_N_LINK_STAT];
 	volatile unsigned long flags;
 	struct {
+		spinlock_t mutex;
 		struct socket *conn;
-		struct {
-			struct spinlock	mutex;
-			struct list_head list;
-		} free, tx;
+		struct list_head free, tx;
 		void *rx;
 	} sb;
 	enum xeth_encap encap;
 };
+
+static void xeth_mux_priv_init(struct xeth_mux_priv *priv)
+{
+	int i;
+
+	mutex_init(&priv->proxy.mutex);
+	spin_lock_init(&priv->sb.mutex);
+
+	for (i = 0; i < xeth_mux_proxy_hash_bkts; i++)
+		INIT_HLIST_HEAD(&priv->proxy.hls[i]);
+	INIT_LIST_HEAD_RCU(&priv->proxy.ports);
+	INIT_LIST_HEAD_RCU(&priv->proxy.vlans);
+	INIT_LIST_HEAD_RCU(&priv->proxy.bridges);
+	INIT_LIST_HEAD_RCU(&priv->proxy.lags);
+	INIT_LIST_HEAD_RCU(&priv->proxy.lbs);
+
+	INIT_LIST_HEAD(&priv->sb.free);
+	INIT_LIST_HEAD(&priv->sb.tx);
+}
+
+static void xeth_mux_lock_proxy(struct xeth_mux_priv *priv)
+{
+	mutex_lock(&priv->proxy.mutex);
+}
+
+static void xeth_mux_unlock_proxy(struct xeth_mux_priv *priv)
+{
+	mutex_unlock(&priv->proxy.mutex);
+}
+
+static void xeth_mux_lock_sb(struct xeth_mux_priv *priv)
+{
+	spin_lock(&priv->sb.mutex);
+}
+
+static void xeth_mux_unlock_sb(struct xeth_mux_priv *priv)
+{
+	spin_unlock(&priv->sb.mutex);
+}
 
 struct xeth_nb *xeth_mux_nb(struct net_device *mux)
 {
@@ -83,144 +115,109 @@ enum xeth_encap xeth_mux_encap(struct net_device *nd)
 	return priv->encap;
 }
 
+struct xeth_proxy *xeth_mux_priv_proxy(struct xeth_mux_priv *priv,
+				       struct xeth_proxy *proxy)
+{
+	rcu_read_unlock();
+	rcu_assign_pointer(priv->proxy.last, proxy);
+	return proxy;
+}
+
 struct xeth_proxy *xeth_mux_proxy_of_xid(struct net_device *mux, u32 xid)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	unsigned bkt = hash_min(xid, xeth_mux_proxy_hash_bits);
-	struct hlist_head __rcu *head;
-	struct xeth_proxy *proxy = NULL;
+	struct xeth_proxy *proxy;
+	unsigned bkt;
 
-	spin_lock(&priv->proxy.mutex);
-	head = &priv->proxy.hls[bkt];
 	rcu_read_lock();
-	if (head) {
-		hlist_for_each_entry_rcu(proxy, head, node)
-			if (proxy->xid == xid)
-				goto xeth_mux_proxy_of_xid_exit;
-		proxy = NULL;
-	}
-xeth_mux_proxy_of_xid_exit:
-	rcu_read_unlock();
-	spin_unlock(&priv->proxy.mutex);
-	return proxy;
+	proxy = rcu_dereference(priv->proxy.last);
+	if (proxy && proxy->xid == xid)
+		return xeth_mux_priv_proxy(priv, proxy);
+	bkt = hash_min(xid, xeth_mux_proxy_hash_bits);
+	hlist_for_each_entry_rcu(proxy, &priv->proxy.hls[bkt], node)
+		if (proxy->xid == xid)
+			return xeth_mux_priv_proxy(priv, proxy);
+	return xeth_mux_priv_proxy(priv, NULL);
 }
 
 struct xeth_proxy *xeth_mux_proxy_of_nd(struct net_device *mux,
 					struct net_device *nd)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct xeth_proxy *proxy = NULL;
-	struct hlist_head __rcu *head;
+	struct xeth_proxy *proxy;
 	unsigned bkt;
 
-	spin_lock(&priv->proxy.mutex);
 	rcu_read_lock();
-	for (bkt = 0; bkt < xeth_mux_proxy_hash_bkts; bkt++) {
-		if (head = &priv->proxy.hls[bkt], head)
-			hlist_for_each_entry_rcu(proxy, head, node)
-				if (proxy->nd == nd)
-					goto xeth_mux_proxy_of_nd_exit;
-		proxy = NULL;
-	}
-xeth_mux_proxy_of_nd_exit:
-	rcu_read_unlock();
-	spin_unlock(&priv->proxy.mutex);
-	return proxy;
+	proxy = rcu_dereference(priv->proxy.last);
+	if (proxy && proxy->nd == nd)
+		return xeth_mux_priv_proxy(priv, proxy);
+	for (bkt = 0; bkt < xeth_mux_proxy_hash_bkts; bkt++)
+		hlist_for_each_entry_rcu(proxy, &priv->proxy.hls[bkt], node)
+			if (proxy->nd == nd)
+				return xeth_mux_priv_proxy(priv, proxy);
+	return xeth_mux_priv_proxy(priv, NULL);
 }
 
 void xeth_mux_add_proxy(struct xeth_proxy *proxy)
 {
 	struct xeth_mux_priv *priv = netdev_priv(proxy->mux);
-	unsigned bkt = hash_min(proxy->xid, xeth_mux_proxy_hash_bits);
-	struct hlist_head __rcu *head;
+	unsigned bkt;
 	
+	bkt = hash_min(proxy->xid, xeth_mux_proxy_hash_bits);
+	xeth_mux_lock_proxy(priv);
+	hlist_add_head_rcu(&proxy->node, &priv->proxy.hls[bkt]);
 	switch (proxy->kind) {
 	case XETH_DEV_KIND_PORT:
-		spin_lock(&priv->ports.mutex);
-		list_add_tail(&proxy->kin, &priv->ports.list);
-		spin_unlock(&priv->ports.mutex);
+		list_add_rcu(&proxy->kin, &priv->proxy.ports);
 		break;
 	case XETH_DEV_KIND_VLAN:
-		spin_lock(&priv->vlans.mutex);
-		list_add_tail(&proxy->kin, &priv->vlans.list);
-		spin_unlock(&priv->vlans.mutex);
+		list_add_rcu(&proxy->kin, &priv->proxy.vlans);
 		break;
 	case XETH_DEV_KIND_BRIDGE:
-		spin_lock(&priv->bridges.mutex);
-		list_add_tail(&proxy->kin, &priv->bridges.list);
-		spin_unlock(&priv->bridges.mutex);
+		list_add_rcu(&proxy->kin, &priv->proxy.bridges);
 		break;
 	case XETH_DEV_KIND_LAG:
-		spin_lock(&priv->lags.mutex);
-		list_add_tail(&proxy->kin, &priv->lags.list);
-		spin_unlock(&priv->lags.mutex);
+		list_add_rcu(&proxy->kin, &priv->proxy.lags);
+		break;
+	case XETH_DEV_KIND_LB:
+		list_add_rcu(&proxy->kin, &priv->proxy.lbs);
 		break;
 	case XETH_DEV_KIND_UNSPEC:
 	default:
 		pr_err("%s:%s: invalid kind: 0x%x", __func__,
 		       netdev_name(proxy->nd), proxy->kind);
-		return;
 	}
-	spin_lock(&priv->proxy.mutex);
-	head = &priv->proxy.hls[bkt];
-	hlist_add_head_rcu(&proxy->node, head);
-	spin_unlock(&priv->proxy.mutex);
+	xeth_mux_unlock_proxy(priv);
 }
 
 void xeth_mux_del_proxy(struct xeth_proxy *proxy)
 {
 	struct xeth_mux_priv *priv = netdev_priv(proxy->mux);
 
-	spin_lock(&priv->proxy.mutex);
+	xeth_mux_lock_proxy(priv);
+	rcu_assign_pointer(priv->proxy.last, NULL);
 	hlist_del_rcu(&proxy->node);
-	spin_unlock(&priv->proxy.mutex);
-	switch (proxy->kind) {
-	case XETH_DEV_KIND_PORT:
-		spin_lock(&priv->ports.mutex);
-		list_del(&proxy->kin);
-		spin_unlock(&priv->ports.mutex);
-		break;
-	case XETH_DEV_KIND_VLAN:
-		spin_lock(&priv->vlans.mutex);
-		list_del(&proxy->kin);
-		spin_unlock(&priv->vlans.mutex);
-		break;
-	case XETH_DEV_KIND_BRIDGE:
-		spin_lock(&priv->bridges.mutex);
-		list_del(&proxy->kin);
-		spin_unlock(&priv->bridges.mutex);
-		break;
-	case XETH_DEV_KIND_LAG:
-		spin_lock(&priv->lags.mutex);
-		list_del(&proxy->kin);
-		spin_unlock(&priv->lags.mutex);
-		break;
-	case XETH_DEV_KIND_UNSPEC:
-	default:
-		pr_err("%s:%s: invalid kind: 0x%x", __func__,
-		       netdev_name(proxy->nd), proxy->kind);
-		break;
-	}
+	list_del(&proxy->kin);
+	xeth_mux_unlock_proxy(priv);
+	synchronize_rcu();
 }
 
 static void xeth_mux_reset_all_link_stats(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct list_head *kin;
+	struct xeth_proxy *proxy;
 
-#define	xeth_mux_reset_kin_link_stats(KIN)				\
-do {									\
-	spin_lock(&priv->KIN.mutex);					\
-	list_for_each(kin, &priv->KIN.list)				\
-		xeth_proxy_reset_link_stats(xeth_proxy_of_kin(kin));	\
-	spin_unlock(&priv->KIN.mutex);					\
-} while(0)
-
-	xeth_mux_reset_kin_link_stats(ports);
-	xeth_mux_reset_kin_link_stats(lags);
-	xeth_mux_reset_kin_link_stats(vlans);
-	xeth_mux_reset_kin_link_stats(bridges);
 	xeth_link_stat_init(priv->link_stats);
+	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
+		xeth_proxy_reset_link_stats(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
+		xeth_proxy_reset_link_stats(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.bridges, kin)
+		xeth_proxy_reset_link_stats(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.lags, kin)
+		xeth_proxy_reset_link_stats(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.lbs, kin)
+		xeth_proxy_reset_link_stats(proxy);
 }
 
 void xeth_mux_change_carrier(struct net_device *mux, struct net_device *nd,
@@ -229,16 +226,12 @@ void xeth_mux_change_carrier(struct net_device *mux, struct net_device *nd,
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 	void (*change_carrier)(struct net_device *dev) =
 		on ? netif_carrier_on : netif_carrier_off;
-	struct list_head *kin;
+	struct xeth_proxy *proxy;
 
 	change_carrier(nd);
-	spin_lock(&priv->vlans.mutex);
-	list_for_each(kin, &priv->vlans.list) {
-		struct xeth_proxy *proxy = xeth_proxy_of_kin(kin);
+	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
 		if (xeth_vlan_has_link(proxy->nd, nd))
 			change_carrier(proxy->nd);
-	}
-	spin_unlock(&priv->vlans.mutex);
 }
 
 void xeth_mux_check_lower_carrier(struct net_device *mux)
@@ -246,6 +239,7 @@ void xeth_mux_check_lower_carrier(struct net_device *mux)
 	struct net_device *lower;
 	struct list_head *lowers;
 	bool carrier = true;
+
 	netdev_for_each_lower_dev(mux, lower, lowers)
 		if (!netif_carrier_ok(lower))
 			carrier = false;
@@ -260,62 +254,46 @@ void xeth_mux_del_vlans(struct net_device *mux, struct net_device *nd,
 			struct list_head *unregq)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct list_head *vlan;
+	struct xeth_proxy *proxy;
 
-	spin_lock(&priv->vlans.mutex);
-	list_for_each(vlan, &priv->vlans.list) {
-		struct xeth_proxy *proxy = xeth_proxy_of_kin(vlan);
+	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
 		if (xeth_vlan_has_link(proxy->nd, nd))
 			unregister_netdevice_queue(proxy->nd, unregq);
-	}
-	spin_unlock(&priv->vlans.mutex);
 }
 
 void xeth_mux_dump_all_ifinfo(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct list_head *kin;
+	struct xeth_proxy *proxy;
 
-#define	xeth_mux_dump_kin_ifinfo(KIN)					\
-do {									\
-	spin_lock(&priv->KIN.mutex);					\
-	list_for_each(kin, &priv->KIN.list) {				\
-		struct xeth_proxy *proxy = xeth_proxy_of_kin(kin);	\
-		xeth_proxy_dump_ifinfo(proxy);				\
-	}								\
-	spin_unlock(&priv->KIN.mutex);					\
-} while(0)
-
-	xeth_mux_dump_kin_ifinfo(ports);
-	xeth_mux_dump_kin_ifinfo(lags);
-	xeth_mux_dump_kin_ifinfo(vlans);
-	xeth_mux_dump_kin_ifinfo(bridges);
+	list_for_each_entry_rcu(proxy, &priv->proxy.lbs, kin)
+		xeth_proxy_dump_ifinfo(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
+		xeth_proxy_dump_ifinfo(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.lags, kin)
+		xeth_proxy_dump_ifinfo(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
+		xeth_proxy_dump_ifinfo(proxy);
+	list_for_each_entry_rcu(proxy, &priv->proxy.bridges, kin)
+		xeth_proxy_dump_ifinfo(proxy);
 }
 
 static void xeth_mux_drop_all_port_carrier(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct list_head *kin;
+	struct xeth_proxy *proxy;
 
-	spin_lock(&priv->ports.mutex);
-	list_for_each(kin, &priv->ports.list) {
-		struct xeth_proxy *proxy = xeth_proxy_of_kin(kin);
+	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
 		netif_carrier_off(proxy->nd);
-	}
-	spin_unlock(&priv->ports.mutex);
 }
 
 static void xeth_mux_reset_all_port_ethtool_stats(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct list_head *kin;
+	struct xeth_proxy *proxy;
 
-	spin_lock(&priv->ports.mutex);
-	list_for_each(kin, &priv->ports.list) {
-		struct xeth_proxy *proxy = xeth_proxy_of_kin(kin);
+	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
 		xeth_port_reset_ethtool_stats(proxy->nd);
-	}
-	spin_unlock(&priv->ports.mutex);
 }
 
 atomic64_t *xeth_mux_counters(struct net_device *mux)
@@ -337,7 +315,11 @@ static void xeth_mux_demux_vlan(struct net_device *mux, struct sk_buff *skb);
 static void xeth_mux_setup(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	int i;
+
+	xeth_mux_priv_init(priv);
+
+	xeth_mux_counter_init(priv->counters);
+	xeth_link_stat_init(priv->link_stats);
 
 	mux->netdev_ops = &xeth_mux_ndo;
 	mux->ethtool_ops = &xeth_mux_ethtool_ops;
@@ -353,28 +335,6 @@ static void xeth_mux_setup(struct net_device *mux)
 	mux->mtu = XETH_SIZEOF_JUMBO_FRAME - VLAN_HLEN;
 
 	/* FIXME should we netif_keep_dst(nd) ? */
-
-	spin_lock_init(&priv->link.mutex);
-	spin_lock_init(&priv->proxy.mutex);
-	spin_lock_init(&priv->sb.free.mutex);
-	spin_lock_init(&priv->ports.mutex);
-	spin_lock_init(&priv->lags.mutex);
-	spin_lock_init(&priv->vlans.mutex);
-	spin_lock_init(&priv->bridges.mutex);
-	spin_lock_init(&priv->sb.tx.mutex);
-
-	for (i = 0; i < xeth_mux_proxy_hash_bkts; i++)
-		WRITE_ONCE(priv->proxy.hls[i].first, NULL);
-
-	INIT_LIST_HEAD(&priv->sb.free.list);
-	INIT_LIST_HEAD(&priv->sb.tx.list);
-	INIT_LIST_HEAD(&priv->ports.list);
-	INIT_LIST_HEAD(&priv->lags.list);
-	INIT_LIST_HEAD(&priv->vlans.list);
-	INIT_LIST_HEAD(&priv->bridges.list);
-
-	xeth_mux_counter_init(priv->counters);
-	xeth_link_stat_init(priv->link_stats);
 }
 
 struct net_device *xeth_mux_probe(struct platform_device *xeth)
@@ -424,90 +384,6 @@ static int xeth_mux_validate(struct nlattr *tb[], struct nlattr *data[],
 	return 0;
 }
 
-static struct xeth_sbtxb *xeth_mux_pop_sbtx(struct net_device *mux)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct xeth_sbtxb *sbtxb;
-
-	spin_lock(&priv->sb.tx.mutex);
-	sbtxb = list_first_entry_or_null(&priv->sb.tx.list,
-					 struct xeth_sbtxb, list);
-	if (sbtxb) {
-		list_del(&sbtxb->list);
-		xeth_mux_dec_sbtx_queued(mux);
-	}
-	spin_unlock(&priv->sb.tx.mutex);
-	return sbtxb;
-}
-
-static void xeth_mux_push_sbtx(struct net_device *mux,
-			       struct xeth_sbtxb *sbtxb)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-
-	spin_lock(&priv->sb.tx.mutex);
-	list_add(&sbtxb->list, &priv->sb.tx.list);
-	spin_unlock(&priv->sb.tx.mutex);
-	xeth_mux_inc_sbtx_queued(mux);
-}
-
-static void xeth_mux_free_sbtxb(struct net_device *mux,
-				struct xeth_sbtxb *sbtxb)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-
-	spin_lock(&priv->sb.free.mutex);
-	list_add_tail(&sbtxb->list, &priv->sb.free.list);
-	xeth_mux_inc_sbtx_free(mux);
-	spin_unlock(&priv->sb.free.mutex);
-}
-
-struct xeth_sbtxb *xeth_mux_alloc_sbtxb(struct net_device *mux, size_t len)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct xeth_sbtxb *sbtxb, *tmp;
-	size_t sz;
-	
-	spin_lock(&priv->sb.free.mutex);
-	list_for_each_entry_safe(sbtxb, tmp, &priv->sb.free.list, list)
-		if (sbtxb->sz >= len) {
-			list_del(&sbtxb->list);
-			xeth_mux_dec_sbtx_free(mux);
-			sbtxb->len = len;
-			xeth_sbtxb_zero(sbtxb);
-			spin_unlock(&priv->sb.free.mutex);
-			return sbtxb;
-		}
-	spin_unlock(&priv->sb.free.mutex);
-	sz = ALIGN(xeth_sbtxb_size + len, 1024);
-	sbtxb = devm_kzalloc(&mux->dev, sz, GFP_KERNEL);
-	sbtxb->len = len;
-	sbtxb->sz = sz - xeth_sbtxb_size;
-	return sbtxb;
-}
-
-static void xeth_mux_flush_sbtx(struct net_device *mux)
-{
-	struct xeth_sbtxb *sbtxb;
-
-	for (sbtxb = xeth_mux_pop_sbtx(mux); sbtxb;
-	     sbtxb = xeth_mux_pop_sbtx(mux))
-		xeth_mux_free_sbtxb(mux, sbtxb);
-	xeth_debug_err(xeth_mux_get_sbtx_queued(mux) > 0);
-}
-
-void xeth_mux_queue_sbtx(struct net_device *mux, struct xeth_sbtxb *sbtxb)
-{
-	if (xeth_mux_has_sb_connection(mux)) {
-		struct xeth_mux_priv *priv = netdev_priv(mux);
-		spin_lock(&priv->sb.tx.mutex);
-		list_add_tail(&sbtxb->list, &priv->sb.tx.list);
-		spin_unlock(&priv->sb.tx.mutex);
-		xeth_mux_inc_sbtx_queued(mux);
-	} else
-		xeth_mux_free_sbtxb(mux, sbtxb);
-}
-
 static int xeth_mux_service_sbrx(void *data)
 {
 	struct net_device *mux = data;
@@ -544,6 +420,113 @@ static struct task_struct *xeth_mux_fork_sbrx(struct net_device *mux)
 	return IS_ERR(t) ? NULL :  t;
 }
 
+struct xeth_sbtxb *xeth_mux_alloc_sbtxb(struct net_device *mux, size_t len)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+	struct xeth_sbtxb *sbtxb, *tmp;
+	size_t sz;
+	
+	xeth_mux_lock_sb(priv);
+	list_for_each_entry_safe(sbtxb, tmp, &priv->sb.free, list)
+		if (sbtxb->sz >= len) {
+			list_del(&sbtxb->list);
+			xeth_mux_unlock_sb(priv);
+			xeth_mux_dec_sbtx_free(mux);
+			sbtxb->len = len;
+			xeth_sbtxb_zero(sbtxb);
+			return sbtxb;
+		}
+	xeth_mux_unlock_sb(priv);
+	sz = ALIGN(xeth_sbtxb_size + len, 1024);
+	sbtxb = devm_kzalloc(&mux->dev, sz, GFP_KERNEL);
+	sbtxb->len = len;
+	sbtxb->sz = sz - xeth_sbtxb_size;
+	return sbtxb;
+}
+
+static void xeth_mux_append_sbtxb(struct net_device *mux,
+				  struct xeth_sbtxb *sbtxb)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+
+	xeth_mux_lock_sb(priv);
+	list_add_tail(&sbtxb->list, &priv->sb.tx);
+	xeth_mux_unlock_sb(priv);
+	xeth_mux_inc_sbtx_queued(mux);
+}
+
+static void xeth_mux_prepend_sbtxb(struct net_device *mux,
+				   struct xeth_sbtxb *sbtxb)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+
+	xeth_mux_lock_sb(priv);
+	list_add(&sbtxb->list, &priv->sb.tx);
+	xeth_mux_unlock_sb(priv);
+	xeth_mux_inc_sbtx_queued(mux);
+}
+
+static struct xeth_sbtxb *xeth_mux_pop_sbtxb(struct net_device *mux)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+	struct xeth_sbtxb *sbtxb;
+
+	xeth_mux_lock_sb(priv);
+	sbtxb = list_first_entry_or_null(&priv->sb.tx,
+					 struct xeth_sbtxb, list);
+	if (sbtxb) {
+		list_del(&sbtxb->list);
+		xeth_mux_dec_sbtx_queued(mux);
+	}
+	xeth_mux_unlock_sb(priv);
+	return sbtxb;
+}
+
+static void xeth_mux_free_sbtxb(struct net_device *mux,
+				struct xeth_sbtxb *sbtxb)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+
+	xeth_mux_lock_sb(priv);
+	list_add_tail(&sbtxb->list, &priv->sb.free);
+	xeth_mux_unlock_sb(priv);
+	xeth_mux_inc_sbtx_free(mux);
+}
+
+void xeth_mux_queue_sbtx(struct net_device *mux, struct xeth_sbtxb *sbtxb)
+{
+	if (xeth_mux_has_sb_connection(mux))
+		xeth_mux_append_sbtxb(mux, sbtxb);
+	else
+		xeth_mux_free_sbtxb(mux, sbtxb);
+}
+
+static int xeth_mux_sbtx(struct net_device *mux, struct xeth_sbtxb *sbtxb)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+	struct kvec iov = {
+		.iov_base = xeth_sbtxb_data(sbtxb),
+		.iov_len  = sbtxb->len,
+	};
+	struct msghdr msg = {
+		.msg_flags = MSG_DONTWAIT,
+	};
+	int n;
+
+	n = kernel_sendmsg(priv->sb.conn, &msg, &iov, 1, iov.iov_len);
+	if (n == -EAGAIN) {
+		xeth_mux_prepend_sbtxb(mux, sbtxb);
+		xeth_mux_inc_sbtx_retries(mux);
+		return n;
+	}
+	xeth_mux_free_sbtxb(mux, sbtxb);
+	if (n > 0) {
+		xeth_mux_inc_sbtx_msgs(mux);
+		return 0;
+	}
+	return n < 0 ? n : 1; /* 1 indicates EOF */
+}
+
 static int xeth_mux_service_sbtx(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
@@ -551,47 +534,36 @@ static int xeth_mux_service_sbtx(struct net_device *mux)
 	const unsigned int minms = 10;
 	unsigned int ms = minms;
 	int err = 0;
+	struct xeth_sbtxb *sbtxb, *tmp;
 
 	while (!err && xeth_mux_has_sbrx_task(mux) &&
 	       !kthread_should_stop() && !signal_pending(current)) {
-		struct xeth_sbtxb *sbtxb;
-
 		xeth_mux_inc_sbtx_ticks(mux);
-		sbtxb = xeth_mux_pop_sbtx(mux);
-		if (!sbtxb) {
+		sbtxb = xeth_mux_pop_sbtxb(mux);
+		if (sbtxb) {
+			ms = minms;
+			err = xeth_mux_sbtx(mux, sbtxb);
+			if (err == -EAGAIN) {
+				err = 0;
+				msleep(ms);
+			}
+		} else {
 			msleep(ms);
 			if (ms < maxms)
 				ms *= 2;
-		} else {
-			int n = 0;
-			struct kvec iov = {
-				.iov_base = xeth_sbtxb_data(sbtxb),
-				.iov_len  = sbtxb->len,
-			};
-			struct msghdr msg = {
-				.msg_flags = MSG_DONTWAIT,
-			};
-
-			ms = minms;
-			n = kernel_sendmsg(priv->sb.conn, &msg,
-					   &iov, 1, iov.iov_len);
-			if (n == -EAGAIN) {
-				xeth_mux_inc_sbtx_retries(mux);
-				xeth_mux_push_sbtx(mux, sbtxb);
-				msleep(ms);
-			} else {
-				xeth_mux_free_sbtxb(mux, sbtxb);
-				if (n > 0)
-					xeth_mux_inc_sbtx_msgs(mux);
-				else if (n < 0)
-					err = n;
-				else	/* EOF */
-					err = 1;
-			}
 		}
 	}
 
-	xeth_mux_flush_sbtx(mux);
+	xeth_mux_lock_sb(priv);
+	list_for_each_entry_safe(sbtxb, tmp, &priv->sb.tx, list) {
+		list_del(&sbtxb->list);
+		xeth_mux_dec_sbtx_queued(mux);
+		list_add_tail(&sbtxb->list, &priv->sb.free);
+		xeth_mux_inc_sbtx_free(mux);
+	}
+	xeth_mux_unlock_sb(priv);
+	xeth_debug_err(xeth_mux_get_sbtx_queued(mux) > 0);
+
 	return err;
 }
 
@@ -634,6 +606,7 @@ static int xeth_mux_main(void *data)
 	err = kernel_listen(ln, backlog);
 	if (err)
 		goto xeth_mux_main_exit;
+	xeth_mux_clear_sb_connection(mux);
 	xeth_mux_set_sb_listen(mux);
 	while(!err && !kthread_should_stop() && !signal_pending(current)) {
 		err = kernel_accept(ln, &priv->sb.conn, O_NONBLOCK);
@@ -675,6 +648,7 @@ xeth_mux_main_exit:
 	xeth_mux_clear_main_task(mux);
 	return err;
 }
+
 static void xeth_mux_rehash_link_ht(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
@@ -684,7 +658,7 @@ static void xeth_mux_rehash_link_ht(struct net_device *mux)
 
 	netdev_for_each_lower_dev(mux, lower, lowers) {
 		for (i = n - 1; i < xeth_mux_link_hash_bkts; i += n)
-			priv->link.ht[i] = lower;
+			priv->link[i] = lower;
 		n++;
 	}
 }
@@ -702,7 +676,6 @@ static int xeth_mux_del_lower(struct net_device *mux, struct net_device *lower)
 static int xeth_mux_add_lower(struct net_device *mux, struct net_device *lower,
 			      struct netlink_ext_ack *extack)
 {
-	struct xeth_mux_priv *priv = netdev_priv(mux);
 	int (*change_mtu_op)(struct net_device *dev, int new_mtu) =
 		lower->netdev_ops->ndo_change_mtu;
 	int err;
@@ -727,16 +700,12 @@ static int xeth_mux_add_lower(struct net_device *mux, struct net_device *lower,
 	if (err)
 		return err;
 
-	spin_lock(&priv->link.mutex);
-
 	lower->flags |= IFF_SLAVE;
 	err = netdev_master_upper_dev_link(lower, mux, NULL, NULL, extack);
 	if (err)
 		lower->flags &= ~IFF_SLAVE;
 	else
 		xeth_mux_rehash_link_ht(mux);
-
-	spin_unlock(&priv->link.mutex);
 
 	if (err)
 		netdev_rx_handler_unregister(lower);
@@ -803,17 +772,10 @@ static void xeth_mux_uninit(struct net_device *mux)
 		while (xeth_mux_has_main_task(mux)) ;
 	}
 
-	spin_lock(&priv->link.mutex);
 	netdev_for_each_lower_dev(mux, lower, lowers)
 		xeth_mux_del_lower(mux, lower);
 	for (i = 0; i < xeth_mux_link_hash_bkts; i++)
-		priv->link.ht[i] = NULL;
-	spin_unlock(&priv->link.mutex);
-
-	spin_lock(&priv->proxy.mutex);
-	for (i = 0; i < xeth_mux_proxy_hash_bkts; i++)
-		WRITE_ONCE(priv->proxy.hls[i].first, NULL);
-	spin_unlock(&priv->proxy.mutex);
+		priv->link[i] = NULL;
 }
 
 /* The mux's newlink will bind a single lower link, however, with platform
@@ -886,9 +848,9 @@ static bool xeth_mux_was_vlan_exception(struct net_device *mux,
 {
 	const u16 expri = 7 << VLAN_PRIO_SHIFT;
 	struct vlan_ethhdr *veh = (struct vlan_ethhdr *)skb->data;
-	u16 pri = be16_to_cpu(veh->h_vlan_TCI) & VLAN_PRIO_MASK;
 
 	if (eth_type_vlan(veh->h_vlan_proto)) {
+		u16 pri = be16_to_cpu(veh->h_vlan_TCI) & VLAN_PRIO_MASK;
 		if (pri == expri) {
 			xeth_mux_vlan_exception(mux, skb);
 			return true;
@@ -897,18 +859,19 @@ static bool xeth_mux_was_vlan_exception(struct net_device *mux,
 	return false;
 }
 
-static netdev_tx_t xeth_mux_vlan_xmit(struct sk_buff *skb, struct net_device *mux)
+static netdev_tx_t xeth_mux_vlan_xmit(struct sk_buff *skb,
+				      struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 	atomic64_t *ls = priv->link_stats;
-	struct net_device *lower;
+	struct net_device *link;
 
 	if (xeth_mux_was_vlan_exception(mux, skb))
 		return NETDEV_TX_OK;
-	lower = priv->link.ht[xeth_mux_link_hash_vlan(skb)];
-	if (lower) {
-		if (lower->flags & IFF_UP) {
-			skb->dev = lower;
+	link = priv->link[xeth_mux_link_hash_vlan(skb)];
+	if (link) {
+		if (link->flags & IFF_UP) {
+			skb->dev = link;
 			no_xeth_debug_skb(skb);
 			if (dev_queue_xmit(skb)) {
 				xeth_inc_TX_DROPPED(ls);
@@ -1144,29 +1107,25 @@ static const struct ethtool_ops xeth_mux_ethtool_ops = {
 	.get_priv_flags = xeth_mux_eto_get_priv_flags,
 };
 
-void xeth_mux_dellink(struct net_device *mux, struct list_head *q)
+void xeth_mux_dellink(struct net_device *mux, struct list_head *unregq)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct list_head *kin;
+	struct xeth_proxy *proxy;
 
 	if (IS_ERR_OR_NULL(mux) || mux->reg_state != NETREG_REGISTERED)
 		return;
 
-#define	xeth_mux_kin_dellink(KIN)					\
-do {									\
-	spin_lock(&priv->KIN.mutex);					\
-	list_for_each(kin, &priv->KIN.list) {				\
-		struct xeth_proxy *proxy = xeth_proxy_of_kin(kin);	\
-		unregister_netdevice_queue(proxy->nd, q);		\
-	}								\
-	spin_unlock(&priv->KIN.mutex);					\
-} while(0)
-
-	xeth_mux_kin_dellink(bridges);
-	xeth_mux_kin_dellink(vlans);
-	xeth_mux_kin_dellink(lags);
-	xeth_mux_kin_dellink(ports);
-	unregister_netdevice_queue(mux, q);
+	list_for_each_entry_rcu(proxy, &priv->proxy.bridges, kin)
+		unregister_netdevice_queue(proxy->nd, unregq);
+	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
+		unregister_netdevice_queue(proxy->nd, unregq);
+	list_for_each_entry_rcu(proxy, &priv->proxy.lags, kin)
+		unregister_netdevice_queue(proxy->nd, unregq);
+	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
+		unregister_netdevice_queue(proxy->nd, unregq);
+	list_for_each_entry_rcu(proxy, &priv->proxy.lbs, kin)
+		unregister_netdevice_queue(proxy->nd, unregq);
+	unregister_netdevice_queue(mux, unregq);
 }
 
 static struct net *xeth_mux_get_link_net(const struct net_device *mux)
