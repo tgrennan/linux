@@ -292,8 +292,20 @@ int xeth_sbtx_ifinfo(struct xeth_proxy *proxy, unsigned iff,
 	msg->net = xeth_sbtx_ns_inum(proxy->nd);
 	msg->ifindex = proxy->nd->ifindex;
 	msg->xid = proxy->xid;
-	if (proxy->kind == XETH_DEV_KIND_LB)
+	switch (proxy->kind) {
+	case XETH_DEV_KIND_UNSPEC:
+	case XETH_DEV_KIND_PORT:
+		break;
+	case XETH_DEV_KIND_VLAN:
+		msg->kdata = xeth_mux_encap(proxy->mux);
+		break;
+	case XETH_DEV_KIND_BRIDGE:
+	case XETH_DEV_KIND_LAG:
+		break;
+	case XETH_DEV_KIND_LB:
 		msg->kdata = xeth_lb_chan(proxy->nd);
+		break;
+	}
 	msg->flags = iff ? iff : proxy->nd->flags;
 	memcpy(msg->addr, proxy->nd->dev_addr, ETH_ALEN);
 	msg->kind = proxy->kind;
