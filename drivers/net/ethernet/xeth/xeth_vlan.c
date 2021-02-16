@@ -23,7 +23,6 @@ static const char xeth_vlan_drvname[] = "xeth-vlan";
 struct xeth_vlan_priv {
 	struct xeth_proxy proxy;
 	struct net_device *link;
-	u16 vid;
 };
 
 bool xeth_vlan_has_link(const struct net_device *nd,
@@ -71,19 +70,27 @@ static void xeth_vlan_get_drvinfo(struct net_device *nd,
 {
 	struct xeth_vlan_priv *priv = netdev_priv(nd);
 	u32 xid;
+	u16 vid;
 
 	switch (xeth_mux_encap(priv->proxy.mux)) {
 	case XETH_ENCAP_VLAN:
-		xid = priv->proxy.xid & ((1<<12)-1);
+		xid = priv->proxy.xid & XETH_ENCAP_VLAN_VID_MASK;
+		vid = priv->proxy.xid >> XETH_ENCAP_VLAN_VID_BIT;
+		break;
 	case XETH_ENCAP_VPLS:
-		xid = priv->proxy.xid & ((1<<20)-1);
+		xid = priv->proxy.xid & XETH_ENCAP_VPLS_VID_MASK;
+		vid = priv->proxy.xid >> XETH_ENCAP_VPLS_VID_BIT;
+		break;
+	default:
+		xid = 0;
+		vid = 0;
+		break;
 	}
 	strlcpy(drvinfo->driver, xeth_vlan_drvname, sizeof(drvinfo->driver));
 	strlcpy(drvinfo->version, XETH_VERSION, sizeof(drvinfo->version));
 	strlcpy(drvinfo->fw_version, "n/a", ETHTOOL_FWVERS_LEN);
 	strlcpy(drvinfo->erom_version, "n/a", ETHTOOL_EROMVERS_LEN);
-	scnprintf(drvinfo->bus_info, ETHTOOL_BUSINFO_LEN, "%u,%u",
-		  xid, priv->vid);
+	scnprintf(drvinfo->bus_info, ETHTOOL_BUSINFO_LEN, "%u,%u", xid, vid);
 }
 
 static const struct ethtool_ops xeth_vlan_eto = {
@@ -141,8 +148,9 @@ static int xeth_vlan_newlink(struct net *src_net, struct net_device *nd,
 			     struct netlink_ext_ack *extack)
 {
 	struct xeth_vlan_priv *priv = netdev_priv(nd);
-	struct xeth_proxy *lproxy;
+	struct xeth_proxy *proxy;
 	int i, err;
+	u16 vid;
 
 	priv->proxy.nd = nd;
 
@@ -150,6 +158,7 @@ static int xeth_vlan_newlink(struct net *src_net, struct net_device *nd,
 	priv->link =
 		dev_get_by_index_rcu(dev_net(nd), nla_get_u32(tb[IFLA_LINK]));
 	rcu_read_unlock();
+
 	if (IS_ERR_OR_NULL(priv->link)) {
 		NL_SET_ERR_MSG(extack, "unkown link");
 		return PTR_ERR(priv->link);
@@ -159,10 +168,10 @@ static int xeth_vlan_newlink(struct net *src_net, struct net_device *nd,
 		return -EINVAL;
 	}
 
-	lproxy = netdev_priv(priv->link);
+	proxy = netdev_priv(priv->link);
 
 	if (data && data[XETH_VLAN_IFLA_VID])
-		priv->vid  = nla_get_u16(data[XETH_VLAN_IFLA_VID]);
+		vid  = nla_get_u16(data[XETH_VLAN_IFLA_VID]);
 	else
 		for (i = 0; i < IFNAMSIZ; i++)
 			if (nd->name[i] == '.') {
@@ -172,12 +181,12 @@ static int xeth_vlan_newlink(struct net *src_net, struct net_device *nd,
 					NL_SET_ERR_MSG(extack, "invalid name");
 					return err;
 				}
-				priv->vid = ull;
+				vid = ull;
 				break;
 			}
 
-	if (priv->vid < 1 || priv->vid >= VLAN_N_VID) {
-		xeth_debug_nd(nd, "vid %d out-of-range", priv->vid);
+	if (vid < 1 || vid >= VLAN_N_VID) {
+		xeth_debug_nd(nd, "vid %d out-of-range", vid);
 		NL_SET_ERR_MSG(extack, "out-of-range VID");
 		return -ERANGE;
 	}
@@ -185,13 +194,16 @@ static int xeth_vlan_newlink(struct net *src_net, struct net_device *nd,
 	eth_hw_addr_inherit(nd, priv->link);
 	nd->addr_assign_type = NET_ADDR_STOLEN;
 
-	priv->proxy.mux = lproxy->mux;
+	priv->proxy.mux = proxy->mux;
+	priv->proxy.xid = proxy->xid;
 
-	switch (xeth_mux_encap(lproxy->mux)) {
+	switch (xeth_mux_encap(proxy->mux)) {
 	case XETH_ENCAP_VLAN:
-		priv->proxy.xid = lproxy->xid | (priv->vid << 12);
+		priv->proxy.xid |= ((u32)vid << XETH_ENCAP_VLAN_VID_BIT);
+		break;
 	case XETH_ENCAP_VPLS:
-		priv->proxy.xid = lproxy->xid | (priv->vid << 20);
+		priv->proxy.xid |= ((u32)vid << XETH_ENCAP_VPLS_VID_BIT);
+		break;
 	}
 
 	nd->min_mtu = priv->link->min_mtu;

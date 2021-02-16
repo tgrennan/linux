@@ -46,6 +46,21 @@ enum {
 	XETH_SIZEOF_JUMBO_FRAME = 9728,
 };
 
+enum xeth_encap {
+	XETH_ENCAP_VLAN = 0,
+	XETH_ENCAP_VPLS,
+};
+
+enum xeth_encap_vid_bit {
+      XETH_ENCAP_VLAN_VID_BIT = 12,
+      XETH_ENCAP_VPLS_VID_BIT = 20,
+};
+
+enum xeth_encap_vid_mask {
+      XETH_ENCAP_VLAN_VID_MASK = (1 << XETH_ENCAP_VLAN_VID_BIT) - 1,
+      XETH_ENCAP_VPLS_VID_MASK = (1 << XETH_ENCAP_VPLS_VID_BIT) - 1,
+};
+
 enum xeth_port_ifla {
 	XETH_PORT_IFLA_UNSPEC,
 	XETH_PORT_IFLA_XID,
@@ -302,7 +317,10 @@ struct xeth_msg_ifa6 {
 struct xeth_msg_ifinfo {
 	struct xeth_msg_header header;
 	uint32_t xid;
-	/* @kdata: kind specific data (e.g. loopback channel) */
+	/* @kdata: kind specific data
+	 * 	vlan: { XETH_ENCAP_VLAN or XETH_ENCAP_VPLS }
+	 * 	loopback: CHANNEL )
+	 */
 	uint32_t kdata;
 	uint8_t ifname[XETH_IFNAMSIZ];
 	uint64_t net;

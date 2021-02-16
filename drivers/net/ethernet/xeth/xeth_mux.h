@@ -12,7 +12,7 @@
 
 #include <linux/platform_device.h>
 #include <net/rtnetlink.h>
-#include <uapi/linux/xeth.h>
+#include <linux/xeth.h>
 
 extern struct rtnl_link_ops xeth_mux_lnko;
 extern const struct net_device_ops xeth_mux_ndo;

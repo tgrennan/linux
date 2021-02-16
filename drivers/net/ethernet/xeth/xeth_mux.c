@@ -913,18 +913,17 @@ static netdev_tx_t xeth_mux_vlan_encap_xmit(struct sk_buff *skb,
 	struct xeth_proxy *proxy = netdev_priv(nd);
 	struct xeth_mux_priv *priv = netdev_priv(proxy->mux);
 	u16 tpid = cpu_to_be16(ETH_P_8021Q);
-	const u16 vidmask = (1 << 12) - 1;
 
 	if (proxy->kind == XETH_DEV_KIND_VLAN) {
-		u16 vid = (u16)(proxy->xid / VLAN_N_VID) & vidmask;
+		u16 vid = proxy->xid >> XETH_ENCAP_VLAN_VID_BIT;
 		skb = vlan_insert_tag_set_proto(skb, tpid, vid);
 		if (skb) {
 			tpid = cpu_to_be16(ETH_P_8021AD);
-			vid = (u16)(proxy->xid) & vidmask;
+			vid = proxy->xid & XETH_ENCAP_VLAN_VID_MASK;
 			skb = vlan_insert_tag_set_proto(skb, tpid, vid);
 		}
 	} else {
-		u16 vid = (u16)(proxy->xid) & vidmask;
+		u16 vid = proxy->xid & XETH_ENCAP_VLAN_VID_MASK;
 		skb = vlan_insert_tag_set_proto(skb, tpid, vid);
 	}
 	if (skb) {
@@ -976,7 +975,8 @@ static void xeth_mux_demux_vlan(struct net_device *mux, struct sk_buff *skb)
 	if (eth_type_vlan(skb->protocol)) {
 		__be16 tci = *(__be16*)(skb->data);
 		__be16 proto = *(__be16*)(skb->data+2);
-		xid |= VLAN_N_VID * (be16_to_cpu(tci) & VLAN_VID_MASK);
+		xid |= (u32)(be16_to_cpu(tci) & VLAN_VID_MASK) <<
+			XETH_ENCAP_VLAN_VID_BIT;
 		skb->protocol = proto;
 		skb_pull_inline(skb, VLAN_HLEN);
 	}

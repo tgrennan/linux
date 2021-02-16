@@ -15,11 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/netdevice.h>
 #include <linux/i2c.h>
-
-enum xeth_encap {
-	XETH_ENCAP_VLAN = 0,
-	XETH_ENCAP_VPLS,
-};
+#include <uapi/linux/xeth.h>
 
 enum {
 	XETH_MAX_ET_STATS = 512,
