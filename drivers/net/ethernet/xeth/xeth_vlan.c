@@ -83,7 +83,7 @@ static void xeth_vlan_get_drvinfo(struct net_device *nd,
 	strlcpy(drvinfo->fw_version, "n/a", ETHTOOL_FWVERS_LEN);
 	strlcpy(drvinfo->erom_version, "n/a", ETHTOOL_EROMVERS_LEN);
 	scnprintf(drvinfo->bus_info, ETHTOOL_BUSINFO_LEN, "%u,%u",
-		  priv->vid, xid);
+		  xid, priv->vid);
 }
 
 static const struct ethtool_ops xeth_vlan_eto = {
