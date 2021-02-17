@@ -144,6 +144,7 @@ netdev_features_t xeth_proxy_fix_features(struct net_device *nd,
 int xeth_proxy_set_features(struct net_device *nd, netdev_features_t features)
 {
 	struct xeth_proxy *proxy = netdev_priv(nd);
-	return (proxy->xid && proxy->mux) ?
-		xeth_sbtx_ifinfo(proxy, 0, XETH_IFINFO_REASON_FEATURES) : 0;
+	nd->features = features;
+	xeth_sbtx_ifinfo(proxy, 0, XETH_IFINFO_REASON_FEATURES);
+	return 1;
 }
