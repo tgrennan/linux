@@ -8,6 +8,7 @@
  */
 
 #include "xeth_mux.h"
+#include "xeth_platform.h"
 #include "xeth_link_stat.h"
 #include "xeth_nb.h"
 #include "xeth_proxy.h"
@@ -34,10 +35,10 @@ enum {
 };
 
 struct xeth_mux_priv {
+	const struct xeth_platform *platform;
 	struct net_device *nd;
 	struct xeth_nb nb;
 	struct task_struct *main;
-	struct platform_device *xeth;
 	struct net_device *link[xeth_mux_link_hash_bkts];
 	struct {
 		struct mutex mutex;
@@ -57,23 +58,10 @@ struct xeth_mux_priv {
 	enum xeth_encap encap;
 };
 
-static void xeth_mux_priv_init(struct xeth_mux_priv *priv)
+const struct xeth_platform *xeth_mux_platform(struct net_device *mux)
 {
-	int i;
-
-	mutex_init(&priv->proxy.mutex);
-	spin_lock_init(&priv->sb.mutex);
-
-	for (i = 0; i < xeth_mux_proxy_hash_bkts; i++)
-		INIT_HLIST_HEAD(&priv->proxy.hls[i]);
-	INIT_LIST_HEAD_RCU(&priv->proxy.ports);
-	INIT_LIST_HEAD_RCU(&priv->proxy.vlans);
-	INIT_LIST_HEAD_RCU(&priv->proxy.bridges);
-	INIT_LIST_HEAD_RCU(&priv->proxy.lags);
-	INIT_LIST_HEAD_RCU(&priv->proxy.lbs);
-
-	INIT_LIST_HEAD(&priv->sb.free);
-	INIT_LIST_HEAD(&priv->sb.tx);
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+	return priv->platform;
 }
 
 static void xeth_mux_lock_proxy(struct xeth_mux_priv *priv)
@@ -94,6 +82,25 @@ static void xeth_mux_lock_sb(struct xeth_mux_priv *priv)
 static void xeth_mux_unlock_sb(struct xeth_mux_priv *priv)
 {
 	spin_unlock(&priv->sb.mutex);
+}
+
+static void xeth_mux_priv_init(struct xeth_mux_priv *priv)
+{
+	int i;
+
+	mutex_init(&priv->proxy.mutex);
+	spin_lock_init(&priv->sb.mutex);
+
+	for (i = 0; i < xeth_mux_proxy_hash_bkts; i++)
+		INIT_HLIST_HEAD(&priv->proxy.hls[i]);
+	INIT_LIST_HEAD_RCU(&priv->proxy.ports);
+	INIT_LIST_HEAD_RCU(&priv->proxy.vlans);
+	INIT_LIST_HEAD_RCU(&priv->proxy.bridges);
+	INIT_LIST_HEAD_RCU(&priv->proxy.lags);
+	INIT_LIST_HEAD_RCU(&priv->proxy.lbs);
+
+	INIT_LIST_HEAD(&priv->sb.free);
+	INIT_LIST_HEAD(&priv->sb.tx);
 }
 
 struct xeth_nb *xeth_mux_nb(struct net_device *mux)
@@ -316,11 +323,6 @@ static void xeth_mux_setup(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 
-	xeth_mux_priv_init(priv);
-
-	xeth_mux_counter_init(priv->counters);
-	xeth_link_stat_init(priv->link_stats);
-
 	mux->netdev_ops = &xeth_mux_ndo;
 	mux->ethtool_ops = &xeth_mux_ethtool_ops;
 	mux->needs_free_netdev = true;
@@ -334,38 +336,161 @@ static void xeth_mux_setup(struct net_device *mux)
 	mux->max_mtu = ETH_MAX_MTU - VLAN_HLEN;
 	mux->mtu = XETH_SIZEOF_JUMBO_FRAME - VLAN_HLEN;
 
+	xeth_mux_priv_init(priv);
+
+	xeth_mux_counter_init(priv->counters);
+	xeth_link_stat_init(priv->link_stats);
+
 	/* FIXME should we netif_keep_dst(nd) ? */
 }
 
-struct net_device *xeth_mux_probe(struct platform_device *xeth)
+static int xeth_mux_set_lower_promiscuity(struct net_device *lower)
+{
+	return xeth_debug_nd_err(lower, dev_set_promiscuity(lower, 1));
+}
+
+static int xeth_mux_set_lower_mtu(struct net_device *lower)
+{
+	int (*change_mtu_op)(struct net_device *dev, int new_mtu) =
+		lower->netdev_ops->ndo_change_mtu;
+	if (!change_mtu_op || lower->mtu == XETH_SIZEOF_JUMBO_FRAME)
+		return 0;
+	return xeth_debug_nd_err(lower,
+				 change_mtu_op(lower, XETH_SIZEOF_JUMBO_FRAME));
+}
+
+static int xeth_mux_lower_is_loopback(struct net_device *mux,
+				      struct net_device *lower)
+{
+	return xeth_debug_nd_err(lower, lower == dev_net(mux)->loopback_dev ?
+				 -EOPNOTSUPP : 0);
+}
+
+static int xeth_mux_lower_is_busy(struct net_device *lower)
+{
+	return xeth_debug_nd_err(lower, netdev_is_rx_handler_busy(lower) ?
+				 -EBUSY : 0);
+}
+
+static int xeth_mux_handle_lower(struct net_device *mux,
+				 struct net_device *lower)
+{
+	return xeth_debug_nd_err(lower,
+				 netdev_rx_handler_register(lower,
+							    xeth_mux_demux,
+							    mux));
+}
+
+static void xeth_mux_rehash_link_ht(struct net_device *mux)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+	struct net_device *lower;
+	struct list_head *lowers;
+	int i, n = 1;
+
+	netdev_for_each_lower_dev(mux, lower, lowers) {
+		for (i = n - 1; i < xeth_mux_link_hash_bkts; i += n)
+			priv->link[i] = lower;
+		n++;
+	}
+}
+
+static int xeth_mux_bind_lower(struct net_device *mux,
+			       struct net_device *lower,
+			       struct netlink_ext_ack *extack)
+{
+	int err;
+
+	lower->flags |= IFF_SLAVE;
+	err = xeth_debug_nd_err(lower,
+				netdev_master_upper_dev_link(lower, mux,
+							     NULL, NULL,
+							     extack));
+	if (err)
+		lower->flags &= ~IFF_SLAVE;
+	else
+		xeth_mux_rehash_link_ht(mux);
+	return err;
+}
+
+static int xeth_mux_add_lower(struct net_device *mux, struct net_device *lower,
+			      struct netlink_ext_ack *extack)
+{
+	int err;
+
+	err = xeth_mux_set_lower_promiscuity(lower);
+	if (!err)
+		err = xeth_mux_set_lower_mtu(lower);
+	if (!err)
+		err = xeth_mux_lower_is_loopback(mux, lower);
+	if (!err)
+		err = xeth_mux_lower_is_busy(lower);
+	if (!err)
+		err = xeth_mux_handle_lower(mux, lower);
+	if (!err)
+		err = xeth_mux_bind_lower(mux, lower, extack);
+
+	if (err)
+		netdev_rx_handler_unregister(lower);
+	return err;
+}
+
+static int xeth_mux_add_platform_links(struct net_device *mux)
+{
+	struct xeth_mux_priv *priv = netdev_priv(mux);
+	int i, err;
+
+	for (i = 0, err = 0; !err && priv->platform->links[i]; i++) {
+		err = xeth_mux_add_lower(mux, priv->platform->links[i], NULL);
+		if (err)
+			dev_put(priv->platform->links[i]);
+	}
+	return err;
+}
+
+static int xeth_mux_del_lower(struct net_device *mux, struct net_device *lower)
+{
+	lower->flags &= ~IFF_SLAVE;
+	netdev_upper_dev_unlink(lower, mux);
+	netdev_rx_handler_unregister(lower);
+	dev_set_promiscuity(lower, -1);
+	dev_put(lower);
+	return 0;
+}
+
+struct net_device *xeth_mux_probe(const struct xeth_platform *platform)
 {
 	struct net_device *mux;
 	struct xeth_mux_priv *priv;
 	char ifname[IFNAMSIZ];
 	int err;
 
-	xeth_vendor_ifname(xeth, ifname, -1, -1);
+	xeth_platform_ifname(platform, ifname, -1, -1);
 	mux = alloc_netdev_mqs(sizeof(*priv), ifname, NET_NAME_ENUM,
-			       xeth_mux_setup, xeth_vendor_n_txqs(xeth),
-			       xeth_vendor_n_rxqs(xeth));
-	if (!mux || IS_ERR(mux))
+			       xeth_mux_setup, 1, 1);
+	if (IS_ERR_OR_NULL(mux))
 		return mux;
 
-	xeth_vendor_hw_addr(xeth, mux, -1, -1);
-
 	priv = netdev_priv(mux);
+	priv->platform = platform;
 	priv->nd = mux;
-	priv->xeth = xeth;
-	priv->encap = xeth_vendor_encap(xeth);
+	priv->encap = platform->encap;
+
+	xeth_platform_hw_addr(platform, mux, -1, -1);
 
 	rtnl_lock();
 	err = register_netdevice(mux);
 	rtnl_unlock();
 
 	if (err) {
+		xeth_debug("%s register failed %d", ifname, err);
 		free_netdev(mux);
 		mux = ERR_PTR(err);
 	}
+
+	rtnl_lock();
+	xeth_mux_add_platform_links(mux);
+	rtnl_unlock();
 
 	return mux;
 }
@@ -649,113 +774,12 @@ xeth_mux_main_exit:
 	return err;
 }
 
-static void xeth_mux_rehash_link_ht(struct net_device *mux)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct net_device *lower;
-	struct list_head *lowers;
-	int i, n = 1;
-
-	netdev_for_each_lower_dev(mux, lower, lowers) {
-		for (i = n - 1; i < xeth_mux_link_hash_bkts; i += n)
-			priv->link[i] = lower;
-		n++;
-	}
-}
-
-static int xeth_mux_del_lower(struct net_device *mux, struct net_device *lower)
-{
-	lower->flags &= ~IFF_SLAVE;
-	netdev_upper_dev_unlink(lower, mux);
-	netdev_rx_handler_unregister(lower);
-	dev_set_promiscuity(lower, -1);
-	dev_put(lower);
-	return 0;
-}
-
-static int xeth_mux_add_lower(struct net_device *mux, struct net_device *lower,
-			      struct netlink_ext_ack *extack)
-{
-	int (*change_mtu_op)(struct net_device *dev, int new_mtu) =
-		lower->netdev_ops->ndo_change_mtu;
-	int err;
-
-	err = dev_set_promiscuity(lower, 1);
-	if (err < 0)
-		return err;
-
-	if (change_mtu_op) {
-		err = change_mtu_op(lower, XETH_SIZEOF_JUMBO_FRAME);
-		if (err)
-			return err;
-	}
-	if (lower == dev_net(mux)->loopback_dev)
-		return -EOPNOTSUPP;
-
-	if (netdev_is_rx_handler_busy(lower))
-		return rtnl_dereference(lower->rx_handler) != xeth_mux_demux ?
-			-EBUSY : 0;
-
-	err = netdev_rx_handler_register(lower, xeth_mux_demux, mux);
-	if (err)
-		return err;
-
-	lower->flags |= IFF_SLAVE;
-	err = netdev_master_upper_dev_link(lower, mux, NULL, NULL, extack);
-	if (err)
-		lower->flags &= ~IFF_SLAVE;
-	else
-		xeth_mux_rehash_link_ht(mux);
-
-	if (err)
-		netdev_rx_handler_unregister(lower);
-	return err;
-}
-
-static int xeth_mux_add_lowers(struct net_device *mux)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-	struct net_device *link; 
-	const char * const * const *links;
-	int i, aka, err = 0;
-
-	if (!priv->xeth)
-		return -EINVAL;
-	links = xeth_vendor_links(priv->xeth);
-	for (i = 0; !err && links[i]; i++) {
-		for (aka = 0; true; aka++) {
-			if (!links[i][aka])
-				return -ENODEV;
-			link = dev_get_by_name(&init_net, links[i][aka]);
-			if (link) {
-				err = xeth_mux_add_lower(mux, link, NULL);
-				if (err)
-					dev_put(link);
-				break;
-			}
-		}
-	}
-	return err;
-}
-
-static bool xeth_mux_has_links(struct net_device *mux)
-{
-	struct net_device *lower;
-	struct list_head *lowers;
-
-	netdev_for_each_lower_dev(mux, lower, lowers)
-		return true;
-	return false;
-}
-
 static int xeth_mux_init(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 
-	if (priv->xeth)
-		xeth_mux_add_lowers(mux);
-
-	priv->main = kthread_run(xeth_mux_main, mux, "%s", mux->name);
+	priv->main = xeth_debug_nd_ptr_err(mux, kthread_run(xeth_mux_main, mux,
+							    "%s", mux->name));
 	return IS_ERR(priv->main) ?  PTR_ERR(priv->main) : 0;
 }
 
@@ -778,23 +802,10 @@ static void xeth_mux_uninit(struct net_device *mux)
 		priv->link[i] = NULL;
 }
 
-/* The mux's newlink will bind a single lower link, however, with platform
- * probed drivers we retry binding lowers on open (aka. admin up) in case
- * we failed to find them at init.
- */
 static int xeth_mux_open(struct net_device *mux)
 {
-	struct xeth_mux_priv *priv = netdev_priv(mux);
 	struct net_device *lower;
 	struct list_head *lowers;
-	int err;
-
-	if (!xeth_mux_has_links(mux)) {
-		if (!priv->xeth)
-			return -EINVAL;
-		if (err = xeth_mux_add_lowers(mux), err)
-			return err;
-	}
 
 	netdev_for_each_lower_dev(mux, lower, lowers)
 		if (!(lower->flags & IFF_UP))

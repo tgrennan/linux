@@ -22,8 +22,6 @@ static inline bool is_xeth_mux(struct net_device *nd)
 	return nd->netdev_ops == &xeth_mux_ndo;
 }
 
-struct net_device *xeth_mux_probe(struct platform_device *);
-
 enum xeth_encap xeth_mux_encap(struct net_device *mux);
 
 netdev_tx_t xeth_mux_encap_xmit(struct sk_buff *, struct net_device *proxy);

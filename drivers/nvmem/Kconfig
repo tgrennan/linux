@@ -239,15 +239,8 @@ config NVMEM_ONIE
 
 	  <https://opencomputeproject.github.io/onie/design-spec/hw_requirements.html>
 
-	  After validation, this driver parses the ONIE vendor field to create
-	  a child platform device named "onie:VENDOR".
-
-	  A vendor platform driver registers id_table matches for the supported
-	  names; then within its probe, matches the appropriate sub-fields (e.g.
-	  part-number or product-name) to create an grand-child platform device.
-	  See,
-
-	    Device Drivers ---> Platform support for ONIE hardware
+	  This driver creates the sysfs device attributes described in
+	  Documentation/ABI/testing/sysfs-driver-onie.
 
 	  If unsure, say N.
 

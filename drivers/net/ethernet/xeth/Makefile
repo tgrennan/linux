@@ -13,3 +13,4 @@ xeth-y += xeth_nb.o
 xeth-y += xeth_sbrx.o
 xeth-y += xeth_sbtx.o
 xeth-y += xeth_qsfp.o
+xeth-y += xeth_platina.o
