@@ -91,6 +91,7 @@ int xeth_proxy_init(struct net_device *nd)
 void xeth_proxy_uninit(struct net_device *nd)
 {
 	struct xeth_proxy *proxy = netdev_priv(nd);
+	xeth_sbtx_ifinfo(proxy, 0, XETH_IFINFO_REASON_DEL);
 	xeth_mux_del_proxy(proxy);
 }
 
