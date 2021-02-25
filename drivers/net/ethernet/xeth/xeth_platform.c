@@ -92,7 +92,7 @@ static int xeth_platform_probe(struct platform_device *pd)
 {
 	const struct xeth_platform *platform;
 	struct net_device *mux;
-	int err, port, subports;
+	int err, port, subport;
 
 	platform = of_device_get_match_data(&pd->dev);
 	if (!platform && pd->id_entry)
@@ -112,7 +112,7 @@ static int xeth_platform_probe(struct platform_device *pd)
 		return err;
 	}
 
-	mux = xeth_mux_probe(platform);
+	mux = xeth_mux(platform, &pd->dev);
 	if (IS_ERR(mux)) {
 		xeth_platform_uninit(platform);
 		device_remove_file(&pd->dev, &xeth_platform_provision_attr);
@@ -121,25 +121,22 @@ static int xeth_platform_probe(struct platform_device *pd)
 
 	platform_set_drvdata(pd, mux);
 
-	for (port = 0; port < xeth_platform_ports(platform); port++) {
+	for (port = 0; port < xeth_platform_ports(platform); port++)
 		switch (xeth_platform_provision[port]) {
 		case 1:
+			xeth_port(mux, port, -1);
+			break;
 		case 2:
 		case 4:
+			for (subport = 0;
+			     subport < xeth_platform_provision[port];
+			     subport++)
+				xeth_port(mux, port, subport);
 			break;
 		default:
 			xeth_platform_provision[port] = 1;
+			xeth_port(mux, port, -1);
 		}
-		subports = xeth_platform_provision[port];
-		if (subports == 2 || subports == 4) {
-			int subport;
-			for (subport = 0; subport < subports; subport++)
-				xeth_port_probe(mux, port, subport);
-		} else {
-			xeth_platform_provision[port] = 1;
-			xeth_port_probe(mux, port, -1);
-		}
-	}
 
 	return 0;
 }

@@ -491,8 +491,7 @@ static void xeth_port_setup(struct net_device *nd)
 	nd->priv_flags |= IFF_DONT_BRIDGE;
 }
 
-struct net_device *xeth_port_probe(struct net_device *mux,
-				   int port, int subport)
+struct net_device *xeth_port(struct net_device *mux, int port, int subport)
 {
 	const struct xeth_platform *platform = xeth_mux_platform(mux);
 	struct net_device *nd;

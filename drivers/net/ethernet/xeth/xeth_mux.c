@@ -458,43 +458,6 @@ static int xeth_mux_del_lower(struct net_device *mux, struct net_device *lower)
 	return 0;
 }
 
-struct net_device *xeth_mux_probe(const struct xeth_platform *platform)
-{
-	struct net_device *mux;
-	struct xeth_mux_priv *priv;
-	char ifname[IFNAMSIZ];
-	int err;
-
-	xeth_platform_ifname(platform, ifname, -1, -1);
-	mux = alloc_netdev_mqs(sizeof(*priv), ifname, NET_NAME_ENUM,
-			       xeth_mux_setup, 1, 1);
-	if (IS_ERR_OR_NULL(mux))
-		return mux;
-
-	priv = netdev_priv(mux);
-	priv->platform = platform;
-	priv->nd = mux;
-	priv->encap = platform->encap;
-
-	xeth_platform_hw_addr(platform, mux, -1, -1);
-
-	rtnl_lock();
-	err = register_netdevice(mux);
-	rtnl_unlock();
-
-	if (err) {
-		xeth_debug("%s register failed %d", ifname, err);
-		free_netdev(mux);
-		mux = ERR_PTR(err);
-	}
-
-	rtnl_lock();
-	xeth_mux_add_platform_links(mux);
-	rtnl_unlock();
-
-	return mux;
-}
-
 static int xeth_mux_validate(struct nlattr *tb[], struct nlattr *data[],
 			      struct netlink_ext_ack *extack)
 {
@@ -774,15 +737,6 @@ xeth_mux_main_exit:
 	return err;
 }
 
-static int xeth_mux_init(struct net_device *mux)
-{
-	struct xeth_mux_priv *priv = netdev_priv(mux);
-
-	priv->main = xeth_debug_nd_ptr_err(mux, kthread_run(xeth_mux_main, mux,
-							    "%s", mux->name));
-	return IS_ERR(priv->main) ?  PTR_ERR(priv->main) : 0;
-}
-
 static void xeth_mux_uninit(struct net_device *mux)
 {
 	struct xeth_mux_priv *priv = netdev_priv(mux);
@@ -1035,7 +989,6 @@ static rx_handler_result_t xeth_mux_demux(struct sk_buff **pskb)
 }
 
 const struct net_device_ops xeth_mux_ndo = {
-	.ndo_init	= xeth_mux_init,
 	.ndo_uninit	= xeth_mux_uninit,
 	.ndo_open	= xeth_mux_open,
 	.ndo_stop	= xeth_mux_stop,
@@ -1155,3 +1108,46 @@ struct rtnl_link_ops xeth_mux_lnko = {
 	.dellink	= xeth_mux_dellink,
 	.get_link_net	= xeth_mux_get_link_net,
 };
+
+struct net_device *xeth_mux(const struct xeth_platform *platform,
+			    struct device *parent)
+{
+	struct net_device *mux;
+	struct xeth_mux_priv *priv;
+	char ifname[IFNAMSIZ];
+	int err;
+
+	xeth_platform_ifname(platform, ifname, -1, -1);
+	mux = xeth_debug_ptr_err(alloc_netdev_mqs(sizeof(*priv), ifname,
+						  NET_NAME_ENUM,
+						  xeth_mux_setup, 1, 1));
+	if (IS_ERR(mux))
+		return mux;
+
+	priv = netdev_priv(mux);
+	priv->platform = platform;
+	priv->nd = mux;
+	priv->encap = platform->encap;
+
+	xeth_platform_hw_addr(platform, mux, -1, -1);
+
+	SET_NETDEV_DEV(mux, parent);
+
+	rtnl_lock();
+	err = xeth_debug_err(register_netdevice(mux));
+	rtnl_unlock();
+
+	if (err) {
+		free_netdev(mux);
+		return ERR_PTR(err);
+	}
+
+	rtnl_lock();
+	xeth_mux_add_platform_links(mux);
+	rtnl_unlock();
+
+	priv->main = xeth_debug_nd_ptr_err(mux,
+					   kthread_run(xeth_mux_main, mux,
+						       "%s", mux->name));
+	return mux;
+}

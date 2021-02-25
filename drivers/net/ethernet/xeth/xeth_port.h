@@ -31,8 +31,7 @@ static inline bool is_xeth_port(struct net_device *nd)
 	return nd->netdev_ops == &xeth_port_ndo;
 }
 
-struct net_device *xeth_port_probe(struct net_device *mux,
-				   int port, int subport);
+struct net_device *xeth_port(struct net_device *mux, int port, int subport);
 
 int xeth_port_of(struct net_device *nd);
 int xeth_port_subport(struct net_device *nd);
