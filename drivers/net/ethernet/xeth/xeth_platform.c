@@ -152,6 +152,7 @@ static int xeth_platform_remove(struct platform_device *pd)
 	mux = platform_get_drvdata(pd);
 	if (!mux)
 		return 0;
+	platform_set_drvdata(pd, NULL);
 
 	device_remove_file(&pd->dev, &xeth_platform_provision_attr);
 	xeth_platform_uninit(xeth_mux_platform(mux));
