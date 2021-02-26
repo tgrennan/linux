@@ -12,6 +12,7 @@
 #include "xeth_proxy.h"
 #include "xeth_lb.h"
 #include "xeth_debug.h"
+#include <net/nexthop.h>
 
 static void xeth_sbtx_msg_set(void *data, enum xeth_msg_kind kind)
 {
@@ -142,16 +143,15 @@ int xeth_sbtx_fib_entry(struct net_device *mux,
 			struct fib_entry_notifier_info *feni,
 			unsigned long event)
 {
-	int i, nhs = 0;
+	int i, nhs;
 	struct xeth_sbtxb *sbtxb;
 	struct xeth_next_hop *nh;
 	struct xeth_msg_fibentry *msg;
 	size_t n = sizeof(*msg);
 
-	if (feni->fi->fib_nhs > 0) {
-		nhs = feni->fi->fib_nhs;
+	nhs = fib_info_num_path(feni->fi);
+	if (nhs > 0)
 		n += (nhs * sizeof(struct xeth_next_hop));
-	}
 	sbtxb = xeth_mux_alloc_sbtxb(mux, n);
 	if (!sbtxb)
 		return -ENOMEM;
@@ -167,14 +167,16 @@ int xeth_sbtx_fib_entry(struct net_device *mux,
 	msg->tos = feni->tos;
 	msg->type = feni->type;
 	msg->table = feni->tb_id;
+	rcu_read_lock();
 	for(i = 0; i < msg->nhs; i++) {
-		nh[i].ifindex = feni->fi->fib_nh[i].fib_nh_dev ?
-			feni->fi->fib_nh[i].fib_nh_dev->ifindex : 0;
-		nh[i].weight = feni->fi->fib_nh[i].fib_nh_weight;
-		nh[i].flags = feni->fi->fib_nh[i].fib_nh_flags;
-		nh[i].gw = feni->fi->fib_nh[i].fib_nh_gw4;
-		nh[i].scope = feni->fi->fib_nh[i].fib_nh_scope;
+		struct fib_nh_common *nhc = fib_info_nhc(feni->fi, i);
+		nh[i].ifindex = nhc->nhc_dev ? nhc->nhc_dev->ifindex : 0;
+		nh[i].weight = nhc->nhc_weight;
+		nh[i].flags = nhc->nhc_flags;
+		nh[i].gw = nhc->nhc_gw.ipv4;
+		nh[i].scope = nhc->nhc_scope;
 	}
+	rcu_read_unlock();
 	no_xeth_debug("%s %pI4/%d w/ %d nexhop(s)",
 		      xeth_sbtx_fib_event_names[event],
 		      &msg->address, feni->dst_len, nhs);
