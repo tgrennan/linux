@@ -188,18 +188,19 @@ int xeth_sbtx_fib6_entry(struct net_device *mux,
 			 struct fib6_entry_notifier_info *feni,
 			 unsigned long event)
 {
-	struct fib6_info *rt = xeth_debug_ptr_err(feni->rt);
+	struct fib6_info *iter, *f6i = xeth_debug_ptr_err(feni->rt);
 	struct xeth_sbtxb *sbtxb;
 	struct xeth_msg_fib6entry *msg;
 	struct xeth_next_hop6 *sibling;
 	size_t n = sizeof(*msg);
-	struct fib6_info *iter;
+	struct fib6_nh *fib6_nh;
+	struct fib_nh_common *nhc;
 	int i;
 
-	if (IS_ERR(rt))
-		return PTR_ERR(rt);
-	if (rt->fib6_nsiblings)
-		n += (rt->fib6_nsiblings * sizeof(struct xeth_next_hop6));
+	if (IS_ERR(f6i))
+		return PTR_ERR(f6i);
+	if (f6i->fib6_nsiblings)
+		n += (f6i->fib6_nsiblings * sizeof(struct xeth_next_hop6));
 	sbtxb = xeth_mux_alloc_sbtxb(mux, n);
 	if (!sbtxb)
 		return -ENOMEM;
@@ -208,33 +209,51 @@ int xeth_sbtx_fib6_entry(struct net_device *mux,
 	xeth_sbtx_msg_set(msg, XETH_MSG_KIND_FIB6ENTRY);
 	msg->net = net_eq(feni->info.net, &init_net) ? 1 :
 		feni->info.net->ns.inum;
-	memcpy(msg->address, &rt->fib6_dst.addr, 16);
-	msg->length = rt->fib6_dst.plen;
+	memcpy(msg->address, &f6i->fib6_dst.addr, 16);
+	msg->length = f6i->fib6_dst.plen;
 	msg->event = (u8)event;
-	msg->nsiblings = rt->fib6_nsiblings;
-	msg->type = rt->fib6_type;
-	msg->table = rt->fib6_table->tb6_id;
-	msg->nh.ifindex = rt->fib6_nh->fib_nh_dev ?
-		rt->fib6_nh->fib_nh_dev->ifindex : 0;
-	msg->nh.weight = rt->fib6_nh->fib_nh_weight;
-	msg->nh.flags = rt->fib6_nh->fib_nh_flags;
-	memcpy(msg->nh.gw, &rt->fib6_nh->fib_nh_gw6, 16);
+	msg->nsiblings = f6i->fib6_nsiblings;
+	msg->type = f6i->fib6_type;
+	msg->table = f6i->fib6_table->tb6_id;
+	fib6_nh = f6i->nh ? nexthop_fib6_nh(f6i->nh) : f6i->fib6_nh;
+	msg->nh.ifindex = fib6_nh->fib_nh_dev ?
+		fib6_nh->fib_nh_dev->ifindex : 0;
+	msg->nh.weight = fib6_nh->fib_nh_weight;
+	msg->nh.flags = fib6_nh->fib_nh_flags;
+	memcpy(msg->nh.gw, &fib6_nh->fib_nh_gw6, 16);
 	i = 0;
-	list_for_each_entry(iter, &rt->fib6_siblings, fib6_siblings) {
-		if (i == rt->fib6_nsiblings)
-			break;
-		sibling->ifindex = iter->fib6_nh->fib_nh_dev ?
-			iter->fib6_nh->fib_nh_dev->ifindex : 0;
-		sibling->weight = iter->fib6_nh->fib_nh_weight;
-		sibling->flags = iter->fib6_nh->fib_nh_flags;
-		memcpy(sibling->gw, &iter->fib6_nh->fib_nh_gw6, 16);
-		i++;
-		sibling++;
-	}
+	rcu_read_lock();
+	if (f6i->nh)
+		list_for_each_entry(iter, &f6i->nh_list, nh_list) {
+			if (i == f6i->fib6_nsiblings)
+				break;
+			fib6_nh = iter->nh ?
+				nexthop_fib6_nh(iter->nh) : iter->fib6_nh;
+			nhc = &fib6_nh->nh_common;
+			sibling->ifindex = nhc->nhc_dev ?
+				nhc->nhc_dev->ifindex : 0;
+			sibling->weight = nhc->nhc_weight;
+			sibling->flags = nhc->nhc_flags;
+			memcpy(sibling->gw, &nhc->nhc_gw.ipv6, 16);
+			i++;
+			sibling++;
+		}
+	else
+		list_for_each_entry(iter, &f6i->fib6_siblings, fib6_siblings) {
+			if (i == f6i->fib6_nsiblings)
+				break;
+			sibling->ifindex = iter->fib6_nh->fib_nh_dev ?
+				iter->fib6_nh->fib_nh_dev->ifindex : 0;
+			sibling->weight = iter->fib6_nh->fib_nh_weight;
+			sibling->flags = iter->fib6_nh->fib_nh_flags;
+			memcpy(sibling->gw, &iter->fib6_nh->fib_nh_gw6, 16);
+			i++;
+			sibling++;
+		}
+	rcu_read_unlock();
 	no_xeth_debug("fib6 %s %pI6c/%d w/ %d nexhop(s)",
 		      xeth_sbtx_fib_event_names[event],
-		      &rt->fib6_dst.addr, rt->fib6_dst.plen,
-		      1+i);
+		      msg->address, msg->length, 1+i);
 	xeth_mux_queue_sbtx(mux, sbtxb);
 	return 0;
 }
