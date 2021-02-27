@@ -87,7 +87,7 @@ struct xeth_platform {
 ssize_t xeth_platform_subports(size_t port);
 
 const struct xeth_platform *xeth_mux_platform(struct net_device *mux);
-struct net_device *xeth_mux(const struct xeth_platform *, struct device *);
+struct net_device *xeth_mux(const struct xeth_platform *);
 
 static inline int xeth_platform_init(const struct xeth_platform *platform,
 				     struct platform_device *pd)

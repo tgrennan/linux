@@ -1109,8 +1109,7 @@ struct rtnl_link_ops xeth_mux_lnko = {
 	.get_link_net	= xeth_mux_get_link_net,
 };
 
-struct net_device *xeth_mux(const struct xeth_platform *platform,
-			    struct device *parent)
+struct net_device *xeth_mux(const struct xeth_platform *platform)
 {
 	struct net_device *mux;
 	struct xeth_mux_priv *priv;
@@ -1130,8 +1129,6 @@ struct net_device *xeth_mux(const struct xeth_platform *platform,
 	priv->encap = platform->encap;
 
 	xeth_platform_hw_addr(platform, mux, -1, -1);
-
-	SET_NETDEV_DEV(mux, parent);
 
 	rtnl_lock();
 	err = xeth_debug_err(register_netdevice(mux));

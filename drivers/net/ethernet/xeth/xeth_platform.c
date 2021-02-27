@@ -112,7 +112,7 @@ static int xeth_platform_probe(struct platform_device *pd)
 		return err;
 	}
 
-	mux = xeth_mux(platform, &pd->dev);
+	mux = xeth_mux(platform);
 	if (IS_ERR(mux)) {
 		xeth_platform_uninit(platform);
 		device_remove_file(&pd->dev, &xeth_platform_provision_attr);
