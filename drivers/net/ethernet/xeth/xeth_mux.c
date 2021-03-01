@@ -215,6 +215,7 @@ static void xeth_mux_reset_all_link_stats(struct net_device *mux)
 	struct xeth_proxy *proxy;
 
 	xeth_link_stat_init(priv->link_stats);
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
 		xeth_proxy_reset_link_stats(proxy);
 	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
@@ -225,6 +226,7 @@ static void xeth_mux_reset_all_link_stats(struct net_device *mux)
 		xeth_proxy_reset_link_stats(proxy);
 	list_for_each_entry_rcu(proxy, &priv->proxy.lbs, kin)
 		xeth_proxy_reset_link_stats(proxy);
+	rcu_read_unlock();
 }
 
 void xeth_mux_change_carrier(struct net_device *mux, struct net_device *nd,
@@ -265,9 +267,11 @@ void xeth_mux_del_vlans(struct net_device *mux, struct net_device *nd,
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 	struct xeth_proxy *proxy;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
 		if (xeth_vlan_has_link(proxy->nd, nd))
 			unregister_netdevice_queue(proxy->nd, unregq);
+	rcu_read_unlock();
 }
 
 void xeth_mux_dump_all_ifinfo(struct net_device *mux)
@@ -275,6 +279,7 @@ void xeth_mux_dump_all_ifinfo(struct net_device *mux)
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 	struct xeth_proxy *proxy;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.lbs, kin)
 		xeth_proxy_dump_ifinfo(proxy);
 	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
@@ -285,6 +290,7 @@ void xeth_mux_dump_all_ifinfo(struct net_device *mux)
 		xeth_proxy_dump_ifinfo(proxy);
 	list_for_each_entry_rcu(proxy, &priv->proxy.bridges, kin)
 		xeth_proxy_dump_ifinfo(proxy);
+	rcu_read_unlock();
 }
 
 static void xeth_mux_drop_all_port_carrier(struct net_device *mux)
@@ -292,8 +298,10 @@ static void xeth_mux_drop_all_port_carrier(struct net_device *mux)
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 	struct xeth_proxy *proxy;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
 		netif_carrier_off(proxy->nd);
+	rcu_read_unlock();
 }
 
 static void xeth_mux_reset_all_port_ethtool_stats(struct net_device *mux)
@@ -301,8 +309,10 @@ static void xeth_mux_reset_all_port_ethtool_stats(struct net_device *mux)
 	struct xeth_mux_priv *priv = netdev_priv(mux);
 	struct xeth_proxy *proxy;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.ports, kin)
 		xeth_port_reset_ethtool_stats(proxy->nd);
+	rcu_read_unlock();
 }
 
 atomic64_t *xeth_mux_counters(struct net_device *mux)
@@ -1081,6 +1091,7 @@ void xeth_mux_dellink(struct net_device *mux, struct list_head *unregq)
 	if (IS_ERR_OR_NULL(mux) || mux->reg_state != NETREG_REGISTERED)
 		return;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.bridges, kin)
 		unregister_netdevice_queue(proxy->nd, unregq);
 	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
@@ -1091,6 +1102,7 @@ void xeth_mux_dellink(struct net_device *mux, struct list_head *unregq)
 		unregister_netdevice_queue(proxy->nd, unregq);
 	list_for_each_entry_rcu(proxy, &priv->proxy.lbs, kin)
 		unregister_netdevice_queue(proxy->nd, unregq);
+	rcu_read_unlock();
 	unregister_netdevice_queue(mux, unregq);
 }
 
