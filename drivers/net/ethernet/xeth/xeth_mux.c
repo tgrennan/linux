@@ -122,8 +122,8 @@ enum xeth_encap xeth_mux_encap(struct net_device *nd)
 	return priv->encap;
 }
 
-struct xeth_proxy *xeth_mux_priv_proxy(struct xeth_mux_priv *priv,
-				       struct xeth_proxy *proxy)
+static struct xeth_proxy *xeth_mux_return_proxy(struct xeth_mux_priv *priv,
+						struct xeth_proxy *proxy)
 {
 	rcu_read_unlock();
 	rcu_assign_pointer(priv->proxy.last, proxy);
@@ -139,12 +139,12 @@ struct xeth_proxy *xeth_mux_proxy_of_xid(struct net_device *mux, u32 xid)
 	rcu_read_lock();
 	proxy = rcu_dereference(priv->proxy.last);
 	if (proxy && proxy->xid == xid)
-		return xeth_mux_priv_proxy(priv, proxy);
+		return xeth_mux_return_proxy(priv, proxy);
 	bkt = hash_min(xid, xeth_mux_proxy_hash_bits);
 	hlist_for_each_entry_rcu(proxy, &priv->proxy.hls[bkt], node)
 		if (proxy->xid == xid)
-			return xeth_mux_priv_proxy(priv, proxy);
-	return xeth_mux_priv_proxy(priv, NULL);
+			return xeth_mux_return_proxy(priv, proxy);
+	return xeth_mux_return_proxy(priv, NULL);
 }
 
 struct xeth_proxy *xeth_mux_proxy_of_nd(struct net_device *mux,
@@ -157,12 +157,12 @@ struct xeth_proxy *xeth_mux_proxy_of_nd(struct net_device *mux,
 	rcu_read_lock();
 	proxy = rcu_dereference(priv->proxy.last);
 	if (proxy && proxy->nd == nd)
-		return xeth_mux_priv_proxy(priv, proxy);
+		return xeth_mux_return_proxy(priv, proxy);
 	for (bkt = 0; bkt < xeth_mux_proxy_hash_bkts; bkt++)
 		hlist_for_each_entry_rcu(proxy, &priv->proxy.hls[bkt], node)
 			if (proxy->nd == nd)
-				return xeth_mux_priv_proxy(priv, proxy);
-	return xeth_mux_priv_proxy(priv, NULL);
+				return xeth_mux_return_proxy(priv, proxy);
+	return xeth_mux_return_proxy(priv, NULL);
 }
 
 void xeth_mux_add_proxy(struct xeth_proxy *proxy)
