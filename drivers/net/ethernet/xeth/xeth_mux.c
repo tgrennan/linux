@@ -236,9 +236,11 @@ void xeth_mux_change_carrier(struct net_device *mux, struct net_device *nd,
 	struct xeth_proxy *proxy;
 
 	change_carrier(nd);
+	rcu_read_lock();
 	list_for_each_entry_rcu(proxy, &priv->proxy.vlans, kin)
 		if (xeth_vlan_has_link(proxy->nd, nd))
 			change_carrier(proxy->nd);
+	rcu_read_unlock();
 }
 
 void xeth_mux_check_lower_carrier(struct net_device *mux)
